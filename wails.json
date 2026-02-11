@@ -1,0 +1,14 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "fetch_reel",
+  "outputfilename": "fetch_reel",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "rongbaile",
+    "email": "q576271589@163.com"
+  },
+  "assetdir": "resources"
+}

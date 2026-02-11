@@ -1,0 +1,19 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="fetch_reel (debug)" type="GoApplicationRunConfiguration" factoryName="Go Application">
+    <module name="fetch_reel" />
+    <working_directory value="$PROJECT_DIR$" />
+    <go_parameters value="-gcflags &quot;all=-N -l&quot; -ldflags &quot; -H windowsgui&quot; -tags desktop,debug -o build/bin/fetch_reel.exe" />
+    <useCustomBuildTags value="true" />
+    <envs>
+      <env name="CGO_ENABLED" value="&quot;0&quot;" />
+      <env name="CGO_LDFLAGS" value="" />
+    </envs>
+    <kind value="DIRECTORY" />
+    <package value="fetch_reel" />
+    <directory value="$PROJECT_DIR$" />
+    <filePath value="$PROJECT_DIR$" />
+    <method v="2">
+      <option name="RunConfigurationTask" enabled="true" run_configuration_name="compile frontend" run_configuration_type="ShConfigurationType" />
+    </method>
+  </configuration>
+</component>

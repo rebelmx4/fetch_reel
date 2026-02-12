@@ -4,9 +4,11 @@ import (
 	"context"
 	"fetch_reel/engine" // 请确保这里的路径与 go.mod 一致
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -19,6 +21,7 @@ type App struct {
 	downloader *engine.Downloader
 	proxy      *engine.ProxyServer
 	hlsParser  *engine.HLSParser
+	httpClient *http.Client
 }
 
 // NewApp creates a new App application struct
@@ -30,6 +33,9 @@ func NewApp() *App {
 		downloader: engine.NewDownloader(manager),
 		proxy:      engine.NewProxyServer(12345),
 		hlsParser:  &engine.HLSParser{},
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second, // 设置 10 秒超时
+		},
 	}
 }
 
@@ -57,7 +63,7 @@ func (a *App) StartBrowser() string {
 }
 
 // CreateDownloadTask 创建任务（处理最高清晰度选择）
-func (a *App) CreateDownloadTask(sniffedUrl, title, originUrl, videoType string) (*engine.VideoTask, error) {
+func (a *App) CreateDownloadTask(sniffedUrl, title, originUrl, videoType string, headers map[string]string) (*engine.VideoTask, error) {
 	finalUrl := sniffedUrl
 	if videoType == "hls" {
 		bestUrl, err := a.hlsParser.GetHighestQualityURL(sniffedUrl)
@@ -65,6 +71,26 @@ func (a *App) CreateDownloadTask(sniffedUrl, title, originUrl, videoType string)
 			finalUrl = bestUrl
 		}
 	}
+
+	// === 新增：预检请求，获取文件总大小 ===
+	var totalSize int64 = 0
+	if videoType == "mp4" {
+		req, err := http.NewRequest("HEAD", finalUrl, nil)
+		if err == nil {
+			// 如果有自定义 Header (如 Cookie)，带上
+			for k, v := range headers {
+				req.Header.Set(k, v)
+			}
+			resp, err := a.httpClient.Do(req)
+			if err == nil {
+				defer resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					totalSize = resp.ContentLength
+				}
+			}
+		}
+	}
+	// ===================================
 
 	exePath, _ := os.Executable()
 	baseDir := filepath.Dir(exePath)
@@ -81,6 +107,8 @@ func (a *App) CreateDownloadTask(sniffedUrl, title, originUrl, videoType string)
 		OriginUrl: originUrl,
 		Type:      videoType,
 		Status:    "sniffed",
+		Size:      totalSize,
+		Headers:   headers, // 把 Header 存入任务
 		SavePath:  savePath,
 		TempDir:   tempDir,
 		Clips:     []engine.Clip{},

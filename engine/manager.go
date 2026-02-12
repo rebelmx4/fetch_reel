@@ -72,6 +72,9 @@ func (m *Manager) UpdateTaskProgress(id string, downloaded int64, speed string) 
 		task.Speed = speed
 		if task.Size > 0 {
 			task.Progress = float64(downloaded) / float64(task.Size) * 100
+		} else {
+			// 如果不知道总大小（比如 m3u8），我们可以根据 FFmpeg 跑的时间来模拟进度
+			// 或者暂时让进度条显示为走马灯效果
 		}
 		m.emitEvent("task_progress", task)
 	}

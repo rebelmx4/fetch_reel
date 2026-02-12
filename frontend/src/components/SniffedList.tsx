@@ -35,7 +35,7 @@ const SniffedList: React.FC<Props> = ({ items, onMark }) => {
     const handleDirectDownload = async (item: SniffEvent) => {
         try {
             // 1. 先在后端创建任务
-            const task = await CreateDownloadTask(item.url, item.title, item.originUrl, item.type);
+            const task = await CreateDownloadTask(item.url, item.title, item.originUrl, item.type, item.headers);
             // 2. 直接开始下载
             await StartDownload(task.id);
             alert("已加入下载队列");
@@ -46,7 +46,7 @@ const SniffedList: React.FC<Props> = ({ items, onMark }) => {
 
     const handleMarkAction = async (item: SniffEvent) => {
         // 进入标记页面前，先创建任务对象，以便后端分配 ID 和 临时目录
-        const task = await CreateDownloadTask(item.url, item.title, item.originUrl, item.type);
+        const task = await CreateDownloadTask(item.url, item.title, item.originUrl, item.type, item.headers);
         onMark(task);
     };
 

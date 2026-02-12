@@ -11,6 +11,7 @@ import { engine } from '../wailsjs/go/models'; // 导入 Go 生成的模型
 export type Clip = engine.Clip;
 export type VideoTask = engine.VideoTask;
 export type SniffEvent = engine.SniffEvent;
+// debugger;
 
 function App() {
     const [activeTab, setActiveTab] = useState<'sniffed' | 'downloads'>('sniffed');

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -13,10 +14,18 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-// Sniffer 负责控制外部 Chrome 并拦截视频地址
 type Sniffer struct {
 	manager *Manager
-	cancel  context.CancelFunc // 用于停止嗅探逻辑
+	cancel  context.CancelFunc
+	rules   []SniffRule // 存储加载的规则
+}
+
+// NewSniffer 初始化时加载配置
+func NewSniffer(m *Manager) *Sniffer {
+	return &Sniffer{
+		manager: m,
+		rules:   LoadSniffRules(), // 加载 rules.json
+	}
 }
 
 func GetSystemEdgePath() string {
@@ -31,10 +40,6 @@ func GetSystemEdgePath() string {
 		return path
 	}
 	return ""
-}
-
-func NewSniffer(m *Manager) *Sniffer {
-	return &Sniffer{manager: m}
 }
 
 // StartBrowser 启动绿色版 Chrome 并开启调试端口
@@ -79,22 +84,18 @@ func (s *Sniffer) listenToCDP() {
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		switch e := ev.(type) {
 		case *network.EventRequestWillBeSent:
-			// 过滤视频链接
-			url := e.Request.URL
-			if s.isMediaURL(url) {
-				// 嗅探到了！
-				log.Printf("嗅探到视频: %s", url)
+			reqUrl := e.Request.URL
 
-				// 构造事件发给前端
-				// 注意：这里暂时拿不到标题，后续可以通过 Page.getTitle 获取
-				event := &SniffEvent{
-					Url:       url,
-					Type:      s.getURLType(url),
-					OriginUrl: e.DocumentURL,
-				}
+			// === 1. 优先匹配配置文件中的规则 ===
+			matchedRule := s.matchRule(reqUrl, e.DocumentURL)
+			if matchedRule != nil {
+				s.handleSpecificSniff(matchedRule, e)
+				return // 命中规则后，不再走通用逻辑
+			}
 
-				// 通过管家发送事件通知 React
-				s.manager.emitEvent("video_sniffed", event)
+			// === 2. 只有没命中规则，才走通用嗅探 ===
+			if s.isGenericMediaURL(reqUrl) {
+				s.handleGenericSniff(reqUrl, e.DocumentURL)
 			}
 		}
 	})
@@ -105,8 +106,89 @@ func (s *Sniffer) listenToCDP() {
 	}
 }
 
-// isMediaURL 判断是否为我们要找的视频资源
-func (s *Sniffer) isMediaURL(url string) bool {
+// matchRule 升级版：支持正则
+func (s *Sniffer) matchRule(url, docUrl string) *SniffRule {
+	for i := range s.rules {
+		rule := &s.rules[i]
+
+		// 1. Host 检查
+		if rule.HostKeyword != "" && !strings.Contains(url, rule.HostKeyword) {
+			continue
+		}
+
+		// 2. 简单包含检查
+		if rule.MustContain != "" && !strings.Contains(url, rule.MustContain) {
+			continue
+		}
+
+		// 3. Referer 检查
+		if rule.TargetReferer != "" && !strings.Contains(docUrl, rule.TargetReferer) {
+			continue
+		}
+
+		// 4. 正则表达式检查 (核心新增)
+		if rule.UrlRegex != "" {
+			matched, err := regexp.MatchString(rule.UrlRegex, url)
+			if err != nil || !matched {
+				continue // 正则不匹配，跳过
+			}
+		}
+
+		return rule
+	}
+	return nil
+}
+
+// handleSpecificSniff 处理命中规则的视频
+func (s *Sniffer) handleSpecificSniff(rule *SniffRule, e *network.EventRequestWillBeSent) {
+	log.Printf("[规则命中: %s] %s", rule.Name, e.Request.URL)
+
+	// 提取指定的 Headers
+	headers := make(map[string]string)
+
+	// CDP 的 Headers 是 map[string]interface{}
+	// 我们遍历规则中要求的 Header，去请求里找
+	for _, key := range rule.CaptureHeaders {
+		// 尝试直接获取
+		if val, ok := e.Request.Headers[key]; ok {
+			headers[key] = fmt.Sprintf("%v", val)
+		} else {
+			// 尝试从混杂大小写中查找 (HTTP头有时候大小写不敏感)
+			for k, v := range e.Request.Headers {
+				if strings.EqualFold(k, key) {
+					headers[key] = fmt.Sprintf("%v", v)
+					break
+				}
+			}
+		}
+	}
+
+	// 发送事件
+	event := &SniffEvent{
+		Url:       e.Request.URL,
+		Title:     "专用嗅探资源", // 依然建议配合 Page.GetTitle 优化
+		OriginUrl: e.DocumentURL,
+		Type:      s.getURLType(e.Request.URL), // 复用原来的类型判断
+		Headers:   headers,                     // 把抓到的 Token/Cookie 传给下载器
+	}
+	s.manager.emitEvent("video_sniffed", event)
+}
+
+// handleGenericSniff 通用处理逻辑 (原来的逻辑)
+func (s *Sniffer) handleGenericSniff(url, origin string) {
+	log.Printf("[通用嗅探] %s", url)
+	event := &SniffEvent{
+		Url:       url,
+		Title:     "未知视频",
+		OriginUrl: origin,
+		Type:      s.getURLType(url),
+		Headers:   nil, // 通用模式通常不需要特殊 Header
+	}
+	s.manager.emitEvent("video_sniffed", event)
+}
+
+// isGenericMediaURL 原来的 isMediaURL
+func (s *Sniffer) isGenericMediaURL(url string) bool {
 	lowerURL := strings.ToLower(url)
 	return strings.Contains(lowerURL, ".m3u8") ||
 		strings.Contains(lowerURL, ".mp4") ||

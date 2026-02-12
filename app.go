@@ -52,8 +52,8 @@ func (a *App) StartBrowser() string {
 	baseDir := filepath.Dir(exePath)
 
 	// 修正：在本地开发时，可能需要指向真实的 Edge 路径或 bin 目录
-	chromePath := filepath.Join(baseDir, "bin", "msedge.exe")
-	userDataDir := filepath.Join(baseDir, "edge_data")
+	chromePath := filepath.Join(baseDir, "chrome", "chrome.exe")
+	userDataDir := filepath.Join(baseDir, "chrome_data")
 
 	err := a.sniffer.StartBrowser(chromePath, userDataDir)
 	if err != nil {
@@ -121,7 +121,7 @@ func (a *App) CreateDownloadTask(sniffedUrl, title, originUrl, videoType string,
 // StartDownload 执行下载
 func (a *App) StartDownload(taskID string) string {
 	exePath, _ := os.Executable()
-	ffmpegPath := filepath.Join(filepath.Dir(exePath), "bin", "ffmpeg.exe")
+	ffmpegPath := filepath.Join(filepath.Dir(exePath), "ffmpeg", "ffmpeg.exe")
 
 	a.downloader.Start(taskID, ffmpegPath)
 	return "已加入下载队列"

@@ -8,16 +8,19 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 )
 
 type Sniffer struct {
-	manager *Manager
-	cancel  context.CancelFunc
-	rules   []SniffRule // 存储加载的规则
+	manager         *Manager
+	cancel          context.CancelFunc
+	rules           []SniffRule // 存储加载的规则
+	attachedTargets sync.Map
 }
 
 // NewSniffer 初始化时加载配置
@@ -53,6 +56,7 @@ func (s *Sniffer) StartBrowser(chromePath string, userDataDir string) error {
 		fmt.Sprintf("--user-data-dir=%s", userDataDir),
 		"--no-first-run",
 		"--no-default-browser-check",
+		"--disable-infobars",
 	}
 
 	cmd := exec.Command(chromePath, args...)
@@ -72,37 +76,88 @@ func (s *Sniffer) StartBrowser(chromePath string, userDataDir string) error {
 	return nil
 }
 
-// listenToCDP 连接到 Chrome 的调试端口并开始嗅探
 func (s *Sniffer) listenToCDP() {
-	// 连接到现有的 Chrome 实例 (9222 端口)
+	// 1. 创建远程分配器
 	allocatorContext, cancel := chromedp.NewRemoteAllocator(context.Background(), "ws://127.0.0.1:9222/")
 	s.cancel = cancel
 
-	ctx, _ := chromedp.NewContext(allocatorContext)
+	// 2. 创建一个根上下文
+	rootCtx, _ := chromedp.NewContext(allocatorContext)
 
-	// 设置监听器
-	chromedp.ListenTarget(ctx, func(ev interface{}) {
-		switch e := ev.(type) {
-		case *network.EventRequestWillBeSent:
-			reqUrl := e.Request.URL
+	// 3. 核心修正：使用 ListenTarget 监听 Target 域的事件
+	chromedp.ListenTarget(rootCtx, func(ev interface{}) {
+		switch ev := ev.(type) {
+		// 当一个新的目标（如标签页）被创建时
+		case *target.EventTargetCreated:
+			info := ev.TargetInfo
+			if info.Type == "page" {
+				log.Printf("发现新标签页: %s (ID: %s)", info.URL, info.TargetID)
 
-			// === 1. 优先匹配配置文件中的规则 ===
-			matchedRule := s.matchRule(reqUrl, e.DocumentURL)
-			if matchedRule != nil {
-				s.handleSpecificSniff(matchedRule, e)
-				return // 命中规则后，不再走通用逻辑
+				// 防止重复附加
+				if _, loaded := s.attachedTargets.LoadOrStore(info.TargetID, true); !loaded {
+					// 为这个新标签页创建一个子上下文
+					childCtx, _ := chromedp.NewContext(rootCtx, chromedp.WithTargetID(info.TargetID))
+					// 在后台 goroutine 中为它附加嗅探器
+					go s.attachSnifferToContext(childCtx)
+				}
 			}
-
-			// === 2. 只有没命中规则，才走通用嗅探 ===
-			if s.isGenericMediaURL(reqUrl) {
-				s.handleGenericSniff(reqUrl, e.DocumentURL)
-			}
+		// 当一个目标被销毁时（如标签页关闭）
+		case *target.EventTargetDestroyed:
+			s.attachedTargets.Delete(ev.TargetID)
+			log.Printf("标签页关闭: (ID: %s)", ev.TargetID)
 		}
 	})
 
-	// 启动 CDP 运行循环
+	// 4. 确保 Target 域的事件被发送
+	if err := chromedp.Run(rootCtx, target.SetDiscoverTargets(true)); err != nil {
+		log.Printf("设置目标发现失败: %v", err)
+		return
+	}
+
+	// 5. 为已存在的标签页附加嗅探器
+	infos, err := chromedp.Targets(rootCtx)
+	if err == nil {
+		for _, info := range infos {
+			if info.Type == "page" {
+				if _, loaded := s.attachedTargets.LoadOrStore(info.TargetID, true); !loaded {
+					childCtx, _ := chromedp.NewContext(rootCtx, chromedp.WithTargetID(info.TargetID))
+					go s.attachSnifferToContext(childCtx)
+				}
+			}
+		}
+	}
+
+	log.Println("CDP 嗅探器已启动，正在监听所有标签页...")
+}
+
+// attachSnifferToContext (保持不变，但要确保在 goroutine 中运行)
+func (s *Sniffer) attachSnifferToContext(ctx context.Context) {
+	// 启用网络域
 	if err := chromedp.Run(ctx, network.Enable()); err != nil {
-		log.Printf("CDP 运行出错: %v", err)
+		// 如果上下文已关闭（例如标签页秒开秒关），这里可能会报错，可以忽略
+		if ctx.Err() == nil {
+			log.Printf("为新标签页开启网络监听失败: %v", err)
+		}
+		return
+	}
+
+	// 监听网络事件
+	chromedp.ListenTarget(ctx, func(ev interface{}) {
+		if req, ok := ev.(*network.EventRequestWillBeSent); ok {
+			s.processRequest(req.Request.URL, req.DocumentURL, req)
+		}
+	})
+}
+
+// ... processRequest, matchRule, handleSpecificSniff, handleGenericSniff, isGenericMediaURL, getURLType 保持不变 ...
+// 为了代码完整性，这里列出 processRequest
+func (s *Sniffer) processRequest(url, docUrl string, e *network.EventRequestWillBeSent) {
+	if matchedRule := s.matchRule(url, docUrl); matchedRule != nil {
+		s.handleSpecificSniff(matchedRule, e)
+		return
+	}
+	if s.isGenericMediaURL(url) {
+		s.handleGenericSniff(url, docUrl)
 	}
 }
 

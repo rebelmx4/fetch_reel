@@ -49,6 +49,16 @@ func (m *Manager) AddTask(task *VideoTask) {
 	m.emitEvent("task_list_updated", m.GetAllTasks())
 }
 
+// RemoveTask 从内存和磁盘中彻底移除任务
+func (m *Manager) RemoveTask(id string) {
+	m.mu.Lock()
+	delete(m.tasks, id)
+	m.mu.Unlock()
+
+	m.saveToDisk()
+	m.emitEvent("task_list_updated", m.GetAllTasks())
+}
+
 // GetAllTasks 获取列表
 func (m *Manager) GetAllTasks() []*VideoTask {
 	m.mu.RLock()

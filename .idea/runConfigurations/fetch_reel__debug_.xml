@@ -2,7 +2,7 @@
   <configuration default="false" name="fetch_reel (debug)" type="GoApplicationRunConfiguration" factoryName="Go Application">
     <module name="fetch_reel" />
     <working_directory value="$PROJECT_DIR$" />
-    <go_parameters value="-gcflags &quot;all=-N -l&quot; -tags desktop,dev,debug -o build/bin/fetch_reel.exe -ldflags &quot; -H windowsgui&quot;" />
+    <go_parameters value="-gcflags &quot;all=-N -l&quot; -tags desktop,dev,debug -o build/bin/fetch_reel.exe -ldflags &quot; -H windowsgui&quot; -gcflags &quot;all=-N -l&quot;" />
     <useCustomBuildTags value="true" />
     <envs>
       <env name="CGO_ENABLED" value="&quot;0&quot;" />

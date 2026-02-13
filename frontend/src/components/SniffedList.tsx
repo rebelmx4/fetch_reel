@@ -1,25 +1,31 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import {
+    ScrollArea, Card, Text, Group, Badge, ActionIcon,
+    Button, Stack, Collapse, Box, Center, Tooltip // 确保这里有 Collapse 和 Tooltip
+} from '@mantine/core';
+
+import {
+    IconPlayerPlay,
+    IconScissors, // 修正拼写：增加 s
+    IconDownload,
+    IconMovie
+} from '@tabler/icons-react';
 import Hls from 'hls.js';
+import { useStore } from '../store/useStore';
 import { CreateDownloadTask, StartDownload } from '../../wailsjs/go/main/App';
-import { SniffEvent, VideoTask } from '../App';
 
-interface Props {
-    items: SniffEvent[];
-    onMark: (task: VideoTask) => void;
-}
-
-const SniffedList: React.FC<Props> = ({ items, onMark }) => {
-    const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
+export default function SniffedList() {
+    const { sniffedMap, activeTargetId, setExpanded, setMarkingTask } = useStore();
+    const [previewIndex, setPreviewIndex] = useState<number | null>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
 
-    // 排序逻辑：大小降序（size 为 0 的排后面）
-    const sortedItems = [...items].sort((a, b) => (b.size || 0) - (a.size || 0));
+    // 只获取当前活跃标签页的资源
+    const items = activeTargetId ? (sniffedMap[activeTargetId] || []) : [];
 
-    // 处理预览播放逻辑 (HLS / MP4)
+    // 处理预览播放
     useEffect(() => {
-        if (expandedIndex !== null && videoRef.current) {
-            const item = sortedItems[expandedIndex];
-            // 使用我们后端 Go 写的代理服务器来绕过跨域和防盗链
+        if (previewIndex !== null && videoRef.current) {
+            const item = items[previewIndex];
             const proxyUrl = `http://127.0.0.1:12345/proxy?url=${encodeURIComponent(item.url)}&referer=${encodeURIComponent(item.originUrl)}`;
 
             if (item.type === 'hls' && Hls.isSupported()) {
@@ -30,90 +36,118 @@ const SniffedList: React.FC<Props> = ({ items, onMark }) => {
                 videoRef.current.src = proxyUrl;
             }
         }
-    }, [expandedIndex]);
+    }, [previewIndex, items]);
 
-    const handleDirectDownload = async (item: SniffEvent) => {
+    const handleMark = async (item: any) => {
+        // 1. 调用后端创建任务，获取分配好的 ID 和临时目录
+        const task = await CreateDownloadTask(item);
+        // 2. 将任务存入 Store 供 MarkingPage 使用
+        setMarkingTask(task);
+        // 3. 扩宽窗口并展示裁切页
+        setExpanded(true);
+    };
+
+    const handleDownload = async (item: any) => {
+        const task = await CreateDownloadTask(item);
+        await StartDownload(task.id);
+        // 自动切换到“正在下载”标签
+        useStore.getState().setTab('active');
+    };
+
+    // 辅助函数：截取 URL 最后一段
+    const getShortUrl = (url: string) => {
         try {
-            // 1. 先在后端创建任务
-            const task = await CreateDownloadTask(item.url, item.title, item.originUrl, item.type, item.headers);
-            // 2. 直接开始下载
-            await StartDownload(task.id);
-            alert("已加入下载队列");
-        } catch (e) {
-            console.error(e);
+            const parts = url.split('/');
+            const last = parts.pop() || parts.pop(); // 处理末尾带斜杠的情况
+            return last?.split('?')[0] || "video_stream";
+        } catch {
+            return "video_stream";
         }
     };
 
-    const handleMarkAction = async (item: SniffEvent) => {
-        // 进入标记页面前，先创建任务对象，以便后端分配 ID 和 临时目录
-        const task = await CreateDownloadTask(item.url, item.title, item.originUrl, item.type, item.headers);
-        onMark(task);
-    };
+    if (!activeTargetId) {
+        return (
+            <Center h="80vh" p="xl">
+                <Text c="dimmed" size="sm" ta="center">请在 Chrome 中选择一个标签页进行嗅探</Text>
+            </Center>
+        );
+    }
 
     return (
-        <div className="flex flex-col">
-            {sortedItems.length === 0 && (
-                <div className="text-gray-500 text-center mt-20">暂未嗅探到资源，请在浏览器中播放视频</div>
+        <ScrollArea h="calc(100vh - 50px)" p="xs">
+            {items.length === 0 ? (
+                <Center h="50vh">
+                    <Stack align="center" gap="xs">
+                        <IconMovie size={40} color="#373A40" />
+                        <Text c="dimmed" size="xs">当前页面暂无媒体资源</Text>
+                    </Stack>
+                </Center>
+            ) : (
+                <Stack gap="sm">
+                    {items.map((item, index) => (
+                        <Card key={index} withBorder padding="sm" radius="md">
+                            <Stack gap="xs">
+                                {/* 标题与基本信息 */}
+                                <div>
+                                    <Text size="sm" fw={700} truncate title={item.title}>
+                                        {item.title || "未知视频"}
+                                    </Text>
+                                    <Text size="10px" c="dimmed" truncate mt={2}>
+                                        {getShortUrl(item.url)}
+                                    </Text>
+                                </div>
+
+                                <Group justify="space-between">
+                                    <Group gap={5}>
+                                        <Badge size="xs" variant="light" color={item.type === 'hls' ? 'orange' : 'blue'}>
+                                            {item.type}
+                                        </Badge>
+                                        {item.size > 0 && (
+                                            <Badge size="xs" variant="outline">
+                                                {(item.size / 1024 / 1024).toFixed(1)}MB
+                                            </Badge>
+                                        )}
+                                    </Group>
+
+                                    {/* 操作按钮组 */}
+                                    <Group gap={5}>
+                                        <Tooltip label="预览">
+                                            <ActionIcon
+                                                variant={previewIndex === index ? "filled" : "light"}
+                                                onClick={() => setPreviewIndex(previewIndex === index ? null : index)}
+                                            >
+                                                <IconPlayerPlay size={16} />
+                                            </ActionIcon>
+                                        </Tooltip>
+                                        <Tooltip label="裁切标记">
+                                            <ActionIcon variant="light" color="grape" onClick={() => handleMark(item)}>
+                                                <IconScissors size={16} />
+                                            </ActionIcon>
+                                        </Tooltip>
+                                        <Tooltip label="全量下载">
+                                            <ActionIcon variant="light" color="green" onClick={() => handleDownload(item)}>
+                                                <IconDownload size={16} />
+                                            </ActionIcon>
+                                        </Tooltip>
+                                    </Group>
+                                </Group>
+
+                                {/* 预览折叠区 */}
+                                <Collapse in={previewIndex === index}>
+                                    <Box mt="xs" bg="black" style={{ borderRadius: '4px', overflow: 'hidden' }}>
+                                        <video
+                                            ref={previewIndex === index ? videoRef : null}
+                                            controls
+                                            autoPlay
+                                            style={{ width: '100%', display: 'block' }}
+                                        />
+                                    </Box>
+                                </Collapse>
+                            </Stack>
+                        </Card>
+                    ))}
+                </Stack>
             )}
-
-            {sortedItems.map((item, index) => (
-                <div key={index} className="border-b border-gray-800 p-3 hover:bg-gray-850 transition">
-                    <div className="flex justify-between items-start">
-                        <div className="flex-1 min-w-0 mr-4">
-                            <div className="text-sm font-medium truncate text-blue-300" title={item.title}>
-                                {item.title || "未知视频"}
-                            </div>
-                            <div className="text-xs text-gray-500 mt-1 truncate">{item.url}</div>
-                            <div className="flex mt-2 space-x-2">
-                <span className="text-[10px] bg-gray-700 px-1.5 py-0.5 rounded text-gray-300 uppercase">
-                  {item.type}
-                </span>
-                                {item.size > 0 && (
-                                    <span className="text-[10px] bg-blue-900/30 px-1.5 py-0.5 rounded text-blue-400">
-                    {(item.size / 1024 / 1024).toFixed(2)} MB
-                  </span>
-                                )}
-                            </div>
-                        </div>
-
-                        <div className="flex space-x-2">
-                            <button
-                                onClick={() => setExpandedIndex(expandedIndex === index ? null : index)}
-                                className="p-1.5 hover:bg-gray-700 rounded text-xs"
-                                title="预览"
-                            >
-                                {expandedIndex === index ? "收起" : "播放"}
-                            </button>
-                            <button
-                                onClick={() => handleMarkAction(item)}
-                                className="p-1.5 bg-purple-600 hover:bg-purple-700 rounded text-xs px-3"
-                            >
-                                标记
-                            </button>
-                            <button
-                                onClick={() => handleDirectDownload(item)}
-                                className="p-1.5 bg-green-600 hover:bg-green-700 rounded text-xs px-3"
-                            >
-                                全量下载
-                            </button>
-                        </div>
-                    </div>
-
-                    {/* 内联预览区域 */}
-                    {expandedIndex === index && (
-                        <div className="mt-3 bg-black rounded overflow-hidden aspect-video">
-                            <video
-                                ref={videoRef}
-                                controls
-                                autoPlay
-                                className="w-full h-full"
-                            />
-                        </div>
-                    )}
-                </div>
-            ))}
-        </div>
+        </ScrollArea>
     );
-};
-
-export default SniffedList;
+}

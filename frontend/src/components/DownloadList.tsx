@@ -1,30 +1,43 @@
-import React, { useState } from 'react';
-import { StartDownload, StopDownload } from '../../wailsjs/go/main/App';
-import { BrowserOpenURL } from '../../wailsjs/runtime'; // Wails 内置：打开本地文件夹或网页
-import { VideoTask } from '../App';
+import React from 'react';
+import {
+    ScrollArea, Card, Text, Group, Progress, ActionIcon,
+    Stack, Badge, Tooltip, Menu, Center, Box, rem
+} from '@mantine/core';
+import {
+    IconPlayerPause, IconPlayerPlay, IconTrash, IconRefresh,
+    IconExternalLink, IconAlertTriangle, IconCheck, IconDownload
+} from '@tabler/icons-react';
+import { modals } from '@mantine/modals'; // 需要在 App.tsx 外层包裹 ModalsProvider
+import { useStore } from '../store/useStore';
+import { StartDownload, StopDownload, DeleteTask, UpdateTaskUrl } from '../../wailsjs/go/main/App';
 
 interface Props {
-    tasks: VideoTask[];
+    type: 'active' | 'done';
 }
 
-const DownloadList: React.FC<Props> = ({ tasks }) => {
-    const [subTab, setSubTab] = useState<'active' | 'done'>('active');
+export default function DownloadList({ type }: Props) {
+    const { tasks, setTab, setRebindingTask } = useStore();
 
-    // 过滤逻辑
-    const activeTasks = tasks.filter(t => t.status !== 'done');
-    const completedTasks = tasks.filter(t => t.status === 'done');
-    const displayTasks = subTab === 'active' ? activeTasks : completedTasks;
+    // 1. 过滤任务
+    const displayTasks = tasks.filter(t => {
+        if (type === 'done') return t.status === 'done';
+        return t.status !== 'done';
+    });
 
-    // 辅助函数：格式化字节大小
+    // 2. 格式化工具
     const formatBytes = (bytes: number) => {
-        if (bytes === 0) return '0 B';
-        const k = 1024;
-        const sizes = ['B', 'KB', 'MB', 'GB'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        if (bytes <= 0) return '0 B';
+        const i = Math.floor(Math.log(bytes) / Math.log(1024));
+        return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + ['B', 'KB', 'MB', 'GB'][i];
     };
 
-    const handleToggleTask = (task: VideoTask) => {
+    const getFileName = (path: string) => {
+        const parts = path.split(/[\\/]/);
+        return parts[parts.length - 1];
+    };
+
+    // 3. 操作处理
+    const handleToggle = (task: any) => {
         if (task.status === 'downloading') {
             StopDownload(task.id);
         } else {
@@ -32,93 +45,114 @@ const DownloadList: React.FC<Props> = ({ tasks }) => {
         }
     };
 
-    const openFolder = () => {
-        // 假设下载目录在程序运行目录下的 Downloads，这里调用系统打开
-        // 在 Go 端我们可以写个专门函数获取，这里先演示用法
-        console.log("尝试打开下载目录...");
-        // 注意：BrowserOpenURL 在不同系统下行为可能不同，通常传入路径即可
+    const handleDelete = (task: any) => {
+        modals.openConfirmModal({
+            title: '确认删除任务',
+            centered: true,
+            children: (
+                <Text size="sm">
+                    你确定要删除任务 "{getFileName(task.savePath)}" 吗？该操作不可撤销。
+                </Text>
+            ),
+            labels: { confirm: '删除', cancel: '取消' },
+            confirmProps: { color: 'red' },
+            onConfirm: () => DeleteTask(task.id),
+        });
+    };
+
+    // 4. 重绑定逻辑 (Re-bind)
+    const handleRebind = (task: any) => {
+        setRebindingTask(task); // 进入重绑定模式
+        setTab('sniffed');      // 自动跳转到嗅探页
     };
 
     return (
-        <div className="flex flex-col h-full">
-            {/* 子标签切换与全局操作 */}
-            <div className="flex justify-between items-center px-4 py-2 bg-gray-800/50">
-                <div className="flex space-x-4 text-xs">
-                    <button
-                        onClick={() => setSubTab('active')}
-                        className={`pb-1 border-b-2 transition ${subTab === 'active' ? 'border-blue-500 text-blue-400' : 'border-transparent text-gray-500'}`}
-                    >
-                        进行中 ({activeTasks.length})
-                    </button>
-                    <button
-                        onClick={() => setSubTab('done')}
-                        className={`pb-1 border-b-2 transition ${subTab === 'done' ? 'border-blue-500 text-blue-400' : 'border-transparent text-gray-500'}`}
-                    >
-                        已完成 ({completedTasks.length})
-                    </button>
-                </div>
-                <button
-                    onClick={openFolder}
-                    className="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-gray-300"
-                >
-                    打开文件夹
-                </button>
-            </div>
+        <ScrollArea h="calc(100vh - 50px)" p="xs">
+            {displayTasks.length === 0 ? (
+                <Center h="50vh">
+                    <Text c="dimmed" size="xs">暂无{type === 'done' ? '已完成' : '下载中'}的任务</Text>
+                </Center>
+            ) : (
+                <Stack gap="sm">
+                    {displayTasks.map((task) => (
+                        <Card key={task.id} withBorder padding="xs" radius="md">
+                            <Stack gap={5}>
+                                {/* 标题行 */}
+                                <Group justify="space-between" wrap="nowrap">
+                                    <Text size="xs" fw={700} truncate flex={1} title={getFileName(task.savePath)}>
+                                        {getFileName(task.savePath)}
+                                    </Text>
 
-            {/* 任务列表 */}
-            <div className="flex-1 overflow-y-auto">
-                {displayTasks.length === 0 && (
-                    <div className="text-gray-600 text-center mt-20 text-sm">暂无任务</div>
-                )}
+                                    {/* 操作按钮 */}
+                                    <Group gap={4}>
+                                        {type === 'active' && (
+                                            <>
+                                                <ActionIcon
+                                                    variant="subtle"
+                                                    size="sm"
+                                                    color={task.status === 'downloading' ? 'blue' : 'green'}
+                                                    onClick={() => handleToggle(task)}
+                                                >
+                                                    {task.status === 'downloading' ? <IconPlayerPause size={14} /> : <IconPlayerPlay size={14} />}
+                                                </ActionIcon>
+                                                <Tooltip label="重新嗅探并绑定链接">
+                                                    <ActionIcon variant="subtle" size="sm" color="orange" onClick={() => handleRebind(task)}>
+                                                        <IconRefresh size={14} />
+                                                    </ActionIcon>
+                                                </Tooltip>
+                                            </>
+                                        )}
+                                        <ActionIcon variant="subtle" size="sm" color="red" onClick={() => handleDelete(task)}>
+                                            <IconTrash size={14} />
+                                        </ActionIcon>
+                                    </Group>
+                                </Group>
 
-                {displayTasks.map((task) => (
-                    <div key={task.id} className="p-4 border-b border-gray-800 hover:bg-gray-850">
-                        <div className="flex justify-between items-start mb-2">
-                            <div className="flex-1 min-w-0">
-                                <div className="text-sm font-medium truncate" title={task.title}>{task.title}</div>
-                                <div className="text-[10px] text-gray-500 mt-1 uppercase">类型: {task.type}</div>
-                            </div>
-                            <div className="flex items-center space-x-3">
-                <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold uppercase ${
-                    task.status === 'downloading' ? 'bg-blue-900 text-blue-300 animate-pulse' :
-                        task.status === 'done' ? 'bg-green-900 text-green-300' : 'bg-gray-700 text-gray-400'
-                }`}>
-                  {task.status}
-                </span>
-                                {task.status !== 'done' && (
-                                    <button
-                                        onClick={() => handleToggleTask(task)}
-                                        className="text-xs text-blue-400 hover:text-blue-300"
-                                    >
-                                        {task.status === 'downloading' ? '暂停' : '继续'}
-                                    </button>
+                                {/* 进度条与速度 (仅下载中展示) */}
+                                {type === 'active' && (
+                                    <>
+                                        <Progress
+                                            value={task.progress}
+                                            size="xs"
+                                            color={task.status === 'error' ? 'red' : 'blue'}
+                                            animated={task.status === 'downloading'}
+                                        />
+                                        <Group justify="space-between">
+                                            <Group gap={8}>
+                                                <Text size="10px" c="dimmed">
+                                                    {formatBytes(task.size > 0 ? (task.size * task.progress / 100) : 0)} / {task.size > 0 ? formatBytes(task.size) : '未知'}
+                                                </Text>
+                                                {task.status === 'downloading' && (
+                                                    <Text size="10px" c="blue" fw={700}>{task.speed}</Text>
+                                                )}
+                                            </Group>
+                                            <Text size="10px" c="dimmed">{task.progress.toFixed(1)}%</Text>
+                                        </Group>
+                                    </>
                                 )}
-                            </div>
-                        </div>
 
-                        {/* 进度条 */}
-                        <div className="w-full bg-gray-800 h-1.5 rounded-full overflow-hidden mb-2">
-                            <div
-                                className="bg-blue-500 h-full transition-all duration-500"
-                                style={{ width: `${task.progress}%` }}
-                            />
-                        </div>
-
-                        {/* 数据统计 */}
-                        <div className="flex justify-between text-[10px] text-gray-500 font-mono">
-                            <div className="flex space-x-3">
-                                <span>已下: {formatBytes(task.downloaded)}</span>
-                                {task.status === 'downloading' && (
-                                    <span className="text-blue-400 font-bold">速度: {task.speed}</span>
+                                {/* 完成状态信息 */}
+                                {type === 'done' && (
+                                    <Group justify="space-between">
+                                        <Text size="10px" c="dimmed">{formatBytes(task.size)}</Text>
+                                        <Badge size="xs" color="green" variant="light" leftSection={<IconCheck size={10} />}>
+                                            已完成
+                                        </Badge>
+                                    </Group>
                                 )}
-                            </div>
-                            <span>进度: {task.progress.toFixed(1)}%</span>
-                        </div>
-                    </div>
-                ))}
-            </div>
-        </div>
+
+                                {/* 错误状态提醒 */}
+                                {task.status === 'error' && (
+                                    <Group gap={4}>
+                                        <IconAlertTriangle size={12} color="red" />
+                                        <Text size="10px" color="red">下载失败，请尝试重新嗅探链接</Text>
+                                    </Group>
+                                )}
+                            </Stack>
+                        </Card>
+                    ))}
+                </Stack>
+            )}
+        </ScrollArea>
     );
-};
-
-export default DownloadList;
+}

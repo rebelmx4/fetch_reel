@@ -3,3 +3,6 @@ node_modules
 frontend/dist
 /build
 /frontend/wailsjs
+/test_server/sample.mp4
+/test_server/node_modules
+/runtime_dep

@@ -6,3 +6,4 @@ frontend/dist
 /test_server/sample.mp4
 /test_server/node_modules
 /runtime_dep
+/test_server/hls

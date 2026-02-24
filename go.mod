@@ -7,7 +7,6 @@ require (
 	github.com/chromedp/chromedp v0.14.2
 	github.com/google/uuid v1.6.0
 	github.com/grafov/m3u8 v0.12.1
-	github.com/robotn/gohook v0.42.3
 	github.com/wailsapp/wails/v2 v2.11.0
 )
 
@@ -37,7 +36,6 @@ require (
 	github.com/tkrajina/go-reflector v0.5.8 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
-	github.com/vcaesar/keycode v0.10.1 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
 	golang.org/x/crypto v0.33.0 // indirect

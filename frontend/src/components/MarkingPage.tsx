@@ -1,11 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
     Box, Stack, Group, Text, Button, ActionIcon,
-    Tooltip, Title, Divider, Center, rem
+    Divider, Center, rem, Tooltip
 } from '@mantine/core';
 import {
-    IconX,  IconTrash, IconDownload,
-    IconPlayerPlay, IconPlayerPause, IconKeyboard
+    IconX, IconTrash, IconDownload,
+    IconPlayerPlay, IconPlayerPause, IconKeyboard, IconScissors
 } from '@tabler/icons-react';
 import Hls from 'hls.js';
 import { useStore } from '../store/useStore';
@@ -22,11 +22,12 @@ export default function MarkingPage() {
     const videoRef = useRef<HTMLVideoElement>(null);
     const hlsRef = useRef<Hls | null>(null);
 
-    // 1. 初始化视频
+    // 1. 视频初始化逻辑
     useEffect(() => {
         if (!markingTask || !videoRef.current) return;
 
         const video = videoRef.current;
+        // 使用后端 proxy 服务
         const proxyUrl = `http://127.0.0.1:12345/proxy?url=${encodeURIComponent(markingTask.url)}&referer=${encodeURIComponent(markingTask.originUrl)}`;
 
         if (markingTask.type === 'hls' && Hls.isSupported()) {
@@ -40,7 +41,7 @@ export default function MarkingPage() {
 
         const onLoadedMetadata = () => {
             setDuration(video.duration);
-            // 默认一个完整的片段
+            // 初始化一段完整的区间
             setClips([{ id: Date.now(), start: 0, end: video.duration, status: 'keep' }]);
         };
         const onTimeUpdate = () => setCurrentTime(video.currentTime);
@@ -52,25 +53,23 @@ export default function MarkingPage() {
         video.addEventListener('play', onPlay);
         video.addEventListener('pause', onPause);
 
-        // 监听快捷键
-        const handleGlobalKeyDown = (e: KeyboardEvent) => {
+        const handleKeyDown = (e: KeyboardEvent) => {
             if (e.key.toLowerCase() === 'q') splitClip();
             if (e.key === 'Delete') mergeClip();
-            if (e.key === ' ') { e.preventDefault(); isPlaying ? video.pause() : video.play(); }
+            if (e.key === ' ') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
         };
-        window.addEventListener('keydown', handleGlobalKeyDown);
+        window.addEventListener('keydown', handleKeyDown);
 
         return () => {
             video.removeEventListener('loadedmetadata', onLoadedMetadata);
             video.removeEventListener('timeupdate', onTimeUpdate);
             video.removeEventListener('play', onPlay);
             video.removeEventListener('pause', onPause);
-            window.removeEventListener('keydown', handleGlobalKeyDown);
+            window.removeEventListener('keydown', handleKeyDown);
             if (hlsRef.current) hlsRef.current.destroy();
         };
     }, [markingTask]);
 
-    // 2. 核心逻辑：分割
     const splitClip = () => {
         const time = videoRef.current?.currentTime || 0;
         setClips(prev => {
@@ -86,12 +85,11 @@ export default function MarkingPage() {
         });
     };
 
-    // 3. 核心逻辑：合并 (向左合并)
     const mergeClip = () => {
         if (selectedClipId === null) return;
         setClips(prev => {
             const index = prev.findIndex(c => c.id === selectedClipId);
-            if (index <= 0) return prev; // 第一段无法向左合并
+            if (index <= 0) return prev;
             const newClips = [...prev];
             newClips[index - 1].end = newClips[index].end;
             newClips.splice(index, 1);
@@ -107,14 +105,11 @@ export default function MarkingPage() {
 
     const handleDownload = async () => {
         if (!markingTask) return;
-        // 过滤掉 exclude 的片段，只保留 keep
         const keepClips = clips
             .filter(c => c.status === 'keep')
             .map((c, i) => ({ index: i, start: c.start, end: c.end }));
 
-        // 更新后端的 Clips 信息
         await UpdateTaskClips(markingTask.id, keepClips);
-        // 开始下载
         await StartDownload(markingTask.id);
 
         handleClose();
@@ -124,30 +119,35 @@ export default function MarkingPage() {
     if (!markingTask) return null;
 
     return (
-        <Stack gap={0} h="100%">
-            {/* 顶部栏 */}
-            <Group justify="space-between" p="md" bg="dark.7">
-                <Text fw={700} size="sm" truncate style={{ maxWidth: rem(300) }}>
-                    裁切: {markingTask.title}
-                </Text>
+        <Stack gap={0} h="100%" bg="#1A1B1E">
+            {/* 顶部标题栏 */}
+            <Group justify="space-between" p="sm" bg="#25262B">
+                <Group gap="xs">
+                    <IconScissors size={18} color="#228be6" />
+                    <Text fw={700} size="sm">视频裁切标记</Text>
+                </Group>
                 <ActionIcon variant="subtle" color="gray" onClick={handleClose}>
                     <IconX size={20} />
                 </ActionIcon>
             </Group>
 
-            <Divider color="dark.5" />
+            <Divider color="#373A40" />
 
-            {/* 视频预览区 (适配 450px 宽度) */}
-            <Box bg="black" style={{ flex: 1, position: 'relative' }}>
+            {/* 视频预览区 */}
+            <Box bg="black" style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
                 <Center h="100%">
                     <video ref={videoRef} style={{ maxWidth: '100%', maxHeight: '100%' }} />
                 </Center>
+                {!isPlaying && (
+                    <Box style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
+                        <IconPlayerPlay size={48} color="white" style={{ opacity: 0.3 }} />
+                    </Box>
+                )}
             </Box>
 
-            {/* 底部轨道区 */}
-            <Box p="md" bg="dark.7">
+            {/* 交互控制区 */}
+            <Box p="md" bg="#25262B">
                 <Stack gap="xs">
-                    {/* 时间显示 */}
                     <Group justify="space-between">
                         <Text size="xs" ff="monospace" c="blue.4">
                             {new Date(currentTime * 1000).toISOString().substr(11, 8)}
@@ -157,11 +157,11 @@ export default function MarkingPage() {
                         </Text>
                     </Group>
 
-                    {/* 交互式轨道 */}
+                    {/* 裁切轨道 */}
                     <Box
-                        h={60}
-                        bg="dark.6"
-                        style={{ borderRadius: rem(8), position: 'relative', overflow: 'hidden', cursor: 'pointer', border: '1px solid #373A40' }}
+                        h={50}
+                        bg="#141517"
+                        style={{ borderRadius: rem(4), position: 'relative', overflow: 'hidden', cursor: 'pointer', border: '1px solid #373A40' }}
                     >
                         <Group gap={0} h="100%" wrap="nowrap">
                             {clips.map((clip) => (
@@ -177,43 +177,39 @@ export default function MarkingPage() {
                                     style={{
                                         width: `${((clip.end - clip.start) / duration) * 100}%`,
                                         height: '100%',
-                                        backgroundColor: clip.status === 'keep' ? 'rgba(34, 139, 230, 0.3)' : 'rgba(250, 82, 82, 0.2)',
-                                        borderRight: '1px solid rgba(0,0,0,0.5)',
+                                        backgroundColor: clip.status === 'keep' ? 'rgba(34, 139, 230, 0.4)' : 'rgba(250, 82, 82, 0.15)',
+                                        borderRight: '1px solid rgba(255,255,255,0.1)',
                                         position: 'relative',
-                                        transition: 'background 0.2s'
+                                        boxSizing: 'border-box'
                                     }}
-                                    className={selectedClipId === clip.id ? 'selected-clip' : ''}
                                 >
-                                    {selectedClipId === clip.id && <Box style={{ position: 'absolute', inset: 0, border: '2px solid white', pointerEvents: 'none' }} />}
+                                    {selectedClipId === clip.id && <Box style={{ position: 'absolute', inset: 0, border: '1.5px solid white', pointerEvents: 'none' }} />}
                                 </Box>
                             ))}
                         </Group>
-
-                        {/* 播放指针 */}
-                        <Box
-                            style={{
-                                position: 'absolute',
-                                left: `${(currentTime / duration) * 100}%`,
-                                top: 0, bottom: 0,
-                                width: 2, backgroundColor: '#FCC419', zIndex: 10, pointerEvents: 'none'
-                            }}
-                        />
+                        {/* 播放头 */}
+                        <Box style={{
+                            position: 'absolute',
+                            left: `${(currentTime / duration) * 100}%`,
+                            top: 0, bottom: 0, width: 2, backgroundColor: '#FCC419', zIndex: 10, pointerEvents: 'none'
+                        }} />
                     </Box>
 
-                    {/* 快捷键提示 & 提交 */}
                     <Group justify="space-between" mt="xs">
-                        <Group gap={15}>
-                            <Stack gap={2}>
-                                <Group gap={4}><IconKeyboard size={12}/><Text size="10px">Q 分割</Text></Group>
-                                <Group gap={4}><IconTrash size={12}/><Text size="10px">Del 合并左侧</Text></Group>
-                            </Stack>
-                            <Text size="10px" c="dimmed">双击片段: 保留/排除</Text>
-                        </Group>
+                        <Stack gap={2}>
+                            <Group gap={4}>
+                                <IconKeyboard size={14} color="gray" />
+                                <Text size="10px" c="dimmed">Q 分割 / Space 播放</Text>
+                            </Group>
 
+                            <Group gap={4}>
+                                <IconTrash size={14} color="gray" /> 
+                                <Text size="10px" c="dimmed">Del 合并左侧 / 双击 排除</Text>
+                            </Group></Stack>
                         <Button
-                            leftSection={<IconDownload size={16} />}
-                            color="green"
-                            radius="xl"
+                            leftSection={<IconDownload size={18} />}
+                            color="blue"
+                            variant="filled"
                             onClick={handleDownload}
                         >
                             开始合并下载

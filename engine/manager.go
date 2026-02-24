@@ -3,34 +3,40 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// Manager 负责管理所有的视频任务、系统状态及持久化
+// taskSnap 存储内存中的实时统计快照
+type taskSnap struct {
+	lastBytes int64
+	lastTime  time.Time
+	currBps   float64 // 平滑后的每秒字节数
+}
+
 type Manager struct {
 	ctx         context.Context
 	tasks       map[string]*VideoTask
+	stats       map[string]*taskSnap // 任务 ID -> 统计快照
 	mu          sync.RWMutex
-	storagePath string // 持久化文件路径
+	storagePath string
 }
 
-// NewManager 创建管理实例并尝试从磁盘加载现有任务
 func NewManager() *Manager {
-	// 获取用户数据目录，准备存储 tasks.json
 	exePath, _ := os.Executable()
-	dataDir := filepath.Dir(exePath)
-	storagePath := filepath.Join(dataDir, "tasks.json")
+	storagePath := filepath.Join(filepath.Dir(exePath), "tasks.json")
 
 	m := &Manager{
 		tasks:       make(map[string]*VideoTask),
+		stats:       make(map[string]*taskSnap),
 		storagePath: storagePath,
 	}
 
-	// 初始化时尝试从磁盘读取
 	m.loadFromDisk()
 	return m
 }
@@ -39,104 +45,137 @@ func (m *Manager) SetContext(ctx context.Context) {
 	m.ctx = ctx
 }
 
-// AddTask 添加任务并持久化
 func (m *Manager) AddTask(task *VideoTask) {
 	m.mu.Lock()
 	m.tasks[task.ID] = task
 	m.mu.Unlock()
-
-	m.saveToDisk() // 状态变更，保存一次
-	m.emitEvent("task_list_updated", m.GetAllTasks())
-}
-
-// RemoveTask 从内存和磁盘中彻底移除任务
-func (m *Manager) RemoveTask(id string) {
-	m.mu.Lock()
-	delete(m.tasks, id)
-	m.mu.Unlock()
-
 	m.saveToDisk()
 	m.emitEvent("task_list_updated", m.GetAllTasks())
 }
 
-// GetAllTasks 获取列表
+// UpdateTaskProgress 后端核心：计算速度和 ETA
+func (m *Manager) UpdateTaskProgress(id string, downloaded int64, _ string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.tasks[id]
+	if !ok {
+		return
+	}
+
+	now := time.Now()
+	snap, exists := m.stats[id]
+
+	if !exists {
+		// 第一次记录
+		m.stats[id] = &taskSnap{
+			lastBytes: downloaded,
+			lastTime:  now,
+		}
+	} else {
+		// 计算增量
+		duration := now.Sub(snap.lastTime).Seconds()
+		if duration >= 0.5 { // 每 0.5 秒计算一次，避免过于频繁导致读数不稳定
+			bytesDiff := downloaded - snap.lastBytes
+			instantBps := float64(bytesDiff) / duration
+
+			// 平滑处理速度 (EMA: 指数移动平均)
+			if snap.currBps == 0 {
+				snap.currBps = instantBps
+			} else {
+				snap.currBps = snap.currBps*0.7 + instantBps*0.3
+			}
+
+			// 更新快照
+			snap.lastBytes = downloaded
+			snap.lastTime = now
+
+			// 更新任务状态
+			task.Speed = m.formatSpeed(snap.currBps)
+			if task.Size > 0 && snap.currBps > 0 {
+				task.RemainingSeconds = int64(float64(task.Size-downloaded) / snap.currBps)
+			} else {
+				task.RemainingSeconds = -1 // 未知
+			}
+		}
+	}
+
+	task.Downloaded = downloaded
+	if task.Size > 0 {
+		task.Progress = float64(downloaded) / float64(task.Size) * 100
+	}
+
+	m.emitEvent("task_progress", task)
+}
+
+func (m *Manager) formatSpeed(bps float64) string {
+	if bps < 1024 {
+		return fmt.Sprintf("%.0f B/s", bps)
+	} else if bps < 1024*1024 {
+		return fmt.Sprintf("%.1f KB/s", bps/1024)
+	}
+	return fmt.Sprintf("%.1f MB/s", bps/1024/1024)
+}
+
+func (m *Manager) RemoveTask(id string) {
+	m.mu.Lock()
+	delete(m.tasks, id)
+	delete(m.stats, id)
+	m.mu.Unlock()
+	m.saveToDisk()
+	m.emitEvent("task_list_updated", m.GetAllTasks())
+}
+
 func (m *Manager) GetAllTasks() []*VideoTask {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
-	// 修复点：确保初始化为一个空切片而不是 nil
 	list := make([]*VideoTask, 0)
-
 	for _, task := range m.tasks {
 		list = append(list, task)
 	}
 	return list
 }
 
-// UpdateTaskProgress 更新进度（高频操作，通常不触发磁盘写入，仅内存更新和事件推送）
-func (m *Manager) UpdateTaskProgress(id string, downloaded int64, speed string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if task, ok := m.tasks[id]; ok {
-		task.Downloaded = downloaded
-		task.Speed = speed
-		if task.Size > 0 {
-			task.Progress = float64(downloaded) / float64(task.Size) * 100
-		} else {
-			// 如果不知道总大小（比如 m3u8），我们可以根据 FFmpeg 跑的时间来模拟进度
-			// 或者暂时让进度条显示为走马灯效果
-		}
-		m.emitEvent("task_progress", task)
-	}
-}
-
-// saveToDisk 将当前所有任务存入 JSON 文件
-func (m *Manager) saveToDisk() {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	data, err := json.MarshalIndent(m.tasks, "", "  ")
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(m.storagePath, data, 0644)
-}
-
-// loadFromDisk 从磁盘读取已保存的任务
-func (m *Manager) loadFromDisk() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	data, err := os.ReadFile(m.storagePath)
-	if err != nil {
-		return // 文件不存在或读取失败，跳过
-	}
-
-	// 将 JSON 重新装载进内存 map
-	_ = json.Unmarshal(data, &m.tasks)
-}
-
-// UpdateTaskStatus 更新状态并持久化（例如从 "downloading" 变更为 "done"）
 func (m *Manager) UpdateTaskStatus(id string, status string) {
 	m.mu.Lock()
 	if task, ok := m.tasks[id]; ok {
 		task.Status = status
+		// 如果状态变更为非下载中，清除速度
+		if status != "downloading" {
+			task.Speed = ""
+			task.RemainingSeconds = 0
+			delete(m.stats, id)
+		}
 	}
 	m.mu.Unlock()
-
 	m.saveToDisk()
 	m.emitEvent("task_list_updated", m.GetAllTasks())
+}
+
+func (m *Manager) saveToDisk() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	data, _ := json.MarshalIndent(m.tasks, "", "  ")
+	_ = os.WriteFile(m.storagePath, data, 0644)
+}
+
+func (m *Manager) loadFromDisk() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	data, err := os.ReadFile(m.storagePath)
+	if err == nil {
+		_ = json.Unmarshal(data, &m.tasks)
+	}
+}
+
+func (m *Manager) GetTaskByID(id string) *VideoTask {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.tasks[id]
 }
 
 func (m *Manager) emitEvent(eventName string, data interface{}) {
 	if m.ctx != nil {
 		runtime.EventsEmit(m.ctx, eventName, data)
 	}
-}
-
-// GetTaskByID 根据 ID 获取单个任务
-func (m *Manager) GetTaskByID(id string) *VideoTask {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.tasks[id]
 }

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -42,72 +44,165 @@ func NewSniffer(m *Manager, env *EnvResolver) *Sniffer {
 	return s
 }
 
-func (s *Sniffer) StartBrowser(userDataDir string) error {
-	// 1. 使用 EnvResolver 获取路径
-	chromePath := s.env.GetChromePath()
-	if chromePath == "" {
-		return fmt.Errorf("找不到 Chrome 浏览器，请检查 bin 目录")
+func (s *Sniffer) StartBrowser() error {
+	// 1. 获取当前程序运行目录
+	exePath, _ := os.Executable()
+	baseDir := filepath.Dir(exePath)
+
+	// 2. 构造数据和缓存目录路径
+	userDataDir := filepath.Join(baseDir, "edge_data", "user_data")
+	cacheDir := filepath.Join(baseDir, "edge_data", "cache")
+
+	// 确保目录存在
+	os.MkdirAll(userDataDir, 0755)
+	os.MkdirAll(cacheDir, 0755)
+
+	// 3. 自动定位 Edge 路径 (从系统盘 Program Files (x86) 查找)
+	// 通常环境变量 ProgramFiles(x86) 会指向 "C:\Program Files (x86)"
+	programFiles := os.Getenv("ProgramFiles(x86)")
+	if programFiles == "" {
+		programFiles = `C:\Program Files (x86)` // 备选兜底
+	}
+	edgePath := filepath.Join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe")
+
+	// 校验文件是否存在
+	if _, err := os.Stat(edgePath); os.IsNotExist(err) {
+		return fmt.Errorf("找不到 Edge 浏览器: %s", edgePath)
 	}
 
-	// 2. 构造启动参数 (移除 chromedp 的封装，直接使用 exec)
+	// 4. 构造启动参数
+	port := 9230
 	args := []string{
-		"--remote-debugging-port=9222",
+		fmt.Sprintf("--remote-debugging-port=%d", port),
 		fmt.Sprintf("--user-data-dir=%s", userDataDir),
-		"--no-first-run",
-		"--no-default-browser-check",
-		// 如果需要防止浏览器在后台没关掉，可以加上这个
-		"--remote-allow-origins=*",
-		"--disable-infobars",
+		fmt.Sprintf("--disk-cache-dir=%s", cacheDir),
+		"--no-first-run",                   // 跳过首次运行向导
+		"--no-default-browser-check",       // 不检查是否为默认浏览器
+		"--remote-allow-origins=*",         // 允许所有跨域调试请求
+		"--disable-infobars",               // 隐藏“正在受自动化软件控制”的提示
+		"--disable-breakpad",               // 禁用崩溃汇报
+		"--disable-session-crashed-bubble", // 禁用“浏览器异常关闭”的恢复提示框
+		"--disable-features=msEdgeUnderstandYourData,msEdgeSidebar,msHubApps", // 禁用侧边栏和个性化数据
+		"--disable-blink-features=AutomationControlled",
+		"--password-store=basic",
+		"--allow-insecure-localhost",
 	}
 
-	cmd := exec.Command(chromePath, args...)
+	log.Printf("正在启动 Edge: %s", edgePath)
+	cmd := exec.Command(edgePath, args...)
 
-	// 3. 启动浏览器进程
+	// 5. 启动 Edge 进程
 	err := cmd.Start()
 	if err != nil {
-		return fmt.Errorf("启动 Chrome 进程失败: %v", err)
+		return fmt.Errorf("启动 Edge 进程失败: %v", err)
 	}
 
-	// 4. 等待浏览器完全启动
+	// 6. 等待浏览器完全启动
 	time.Sleep(2 * time.Second)
 
-	// 5. 启动 CDP 监听 (保持原来的 listenToCDP 逻辑)
-	go s.listenToCDP()
+	// 7. 启动 CDP 监听 (注意端口改为 9230)
+	go s.listenToCDP(port)
 
 	return nil
 }
 
-func (s *Sniffer) listenToCDP() {
-	allocatorContext, _ := chromedp.NewRemoteAllocator(context.Background(), "ws://127.0.0.1:9222/")
-	rootCtx, _ := chromedp.NewContext(allocatorContext)
+func (s *Sniffer) listenToCDP(port int) {
+	// 1. 等待 Edge 调试端口完全就绪
+	// 这一步非常重要，防止 i/o timeout
+	var targetID string
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
-	// --- 关键联动逻辑：监听标签页切换和销毁 ---
+	log.Printf("等待 Edge 调试接口就绪...")
+	for i := 0; i < 20; i++ { // 最多等待 10 秒
+		resp, err := http.Get(fmt.Sprintf("http://%s/json/list", addr))
+		if err == nil {
+			var targets []map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&targets); err == nil {
+				for _, t := range targets {
+					// 寻找 Edge 启动时自带的那个 "新标签页" (type=page)
+					if t["type"] == "page" && t["id"] != "" {
+						targetID = t["id"].(string)
+						break
+					}
+				}
+			}
+			resp.Body.Close()
+		}
+		if targetID != "" {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	if targetID == "" {
+		log.Printf("错误: 无法获取 Edge 初始页面 ID")
+		return
+	}
+
+	// 2. 创建分配器
+	wsAddr := fmt.Sprintf("ws://%s/", addr)
+	allocatorCtx, _ := chromedp.NewRemoteAllocator(context.Background(), wsAddr)
+
+	// 3. 【核心技巧】：直接用 WithTargetID 创建第一个上下文
+	// 这样 chromedp 就会直接接管现有的页面，而不会去创建一个 about:blank
+	rootCtx, _ := chromedp.NewContext(allocatorCtx, chromedp.WithTargetID(target.ID(targetID)))
+	// 注意：为了防止程序退出，这里暂时不调用 rootCancel()
+
+	// 4. 立即初始化 network 等功能 (在主线程执行，确保连接稳固)
+	if err := chromedp.Run(rootCtx, network.Enable()); err != nil {
+		log.Printf("无法初始化 CDP 连接: %v", err)
+		return
+	}
+
+	log.Printf("CDP 连接已建立，绑定到页面: %s", targetID)
+
+	// 5. 开启全局监听，处理以后新开的标签页
 	chromedp.ListenTarget(rootCtx, func(ev interface{}) {
 		switch ev := ev.(type) {
 		case *target.EventTargetCreated:
 			if ev.TargetInfo.Type == "page" {
-				targetID := ev.TargetInfo.TargetID
-				childCtx, _ := chromedp.NewContext(rootCtx, chromedp.WithTargetID(targetID))
-				go s.attachSnifferToContext(childCtx, string(targetID))
+				// 再次过滤 about:blank
+				if ev.TargetInfo.URL == "about:blank" {
+					return
+				}
+				tID := ev.TargetInfo.TargetID
+				log.Printf("检测到新标签页: %s", tID)
+
+				// 为新标签页创建独立的上下文并启动嗅探
+				go func(id target.ID) {
+					// 给浏览器一点点反应时间
+					time.Sleep(200 * time.Millisecond)
+					childCtx, _ := chromedp.NewContext(rootCtx, chromedp.WithTargetID(id))
+					s.attachSnifferToContext(childCtx, string(id))
+				}(tID)
 			}
 		case *target.EventTargetInfoChanged:
-			// 当用户点击 Chrome 标签页切换焦点时，通知前端
 			if ev.TargetInfo.Type == "page" && ev.TargetInfo.Attached {
 				s.manager.emitEvent("tab_focused", ev.TargetInfo.TargetID)
 			}
 		case *target.EventTargetDestroyed:
-			// 当标签页关闭时，通知前端清理该标签页的嗅探记录
 			s.manager.emitEvent("tab_closed", ev.TargetID)
 		}
 	})
 
-	chromedp.Run(rootCtx, target.SetDiscoverTargets(true))
+	// 6. 为第一个页面（即现在的 rootCtx）启动嗅探逻辑
+	// 因为 rootCtx 已经 WithTargetID 了，直接传入即可
+	go s.attachSnifferToContext(rootCtx, targetID)
+
+	// 阻塞运行
+	<-rootCtx.Done()
 }
 
 // 在 sniffer.txt 中修改或添加逻辑
 
 func (s *Sniffer) attachSnifferToContext(ctx context.Context, targetID string) {
-	if err := chromedp.Run(ctx, network.Enable()); err != nil {
+	if ctx == nil {
+		return
+	}
+
+	err := chromedp.Run(ctx, network.Enable())
+	if err != nil {
+		log.Printf("[Target %s] 启用 Network 失败: %v", targetID, err)
 		return
 	}
 

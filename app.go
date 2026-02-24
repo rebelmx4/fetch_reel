@@ -4,15 +4,15 @@ import (
 	"context"
 	"fetch_reel/engine"
 	"fetch_reel/engine/downloader"
-	"fmt"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	hook "github.com/robotn/gohook"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -23,8 +23,7 @@ type App struct {
 	downloader *downloader.Downloader
 	env        *engine.EnvResolver
 
-	// 窗口状态
-	isHidden   bool
+	isPinned   bool // 记录是否置顶
 	isExpanded bool
 }
 
@@ -38,211 +37,172 @@ func NewApp() *App {
 		manager:    manager,
 		sniffer:    sniffer,
 		downloader: dl,
-		env:        env,
-		isHidden:   false,
-		isExpanded: false,
+		isPinned:   true, // 默认置顶（与 main.go 一致）
 	}
 }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.manager.SetContext(ctx)
-
-	// 启动时初始化：靠右侧置顶
-	// runtime.WindowSetAlwaysOnTop(a.ctx, true)
-
-	// 注册全局热键 Ctrl + Alt + X
-	// go a.setupGlobalHotkeys()
 }
 
-// setupGlobalHotkeys 监听系统全局按键
-func (a *App) setupGlobalHotkeys() {
-	// 1. 注册组合键逻辑
-	// 注意：gohook 的组合键顺序通常不敏感，但建议写全
-	hook.Register(hook.KeyDown, []string{"ctrl", "alt", "x"}, func(e hook.Event) {
-		// 当按下组合键时触发
-		a.ToggleWindow()
-	})
-
-	// 2. 启动监听
-	s := hook.Start()
-
-	// 3. 进入事件循环 (Process 会阻塞当前协程)
-	<-hook.Process(s)
+// TogglePin 切换窗口置顶状态
+func (a *App) TogglePin() bool {
+	a.isPinned = !a.isPinned
+	runtime.WindowSetAlwaysOnTop(a.ctx, a.isPinned)
+	return a.isPinned
 }
 
-// ToggleWindow 切换窗口的显示和隐藏
-func (a *App) ToggleWindow() {
-	if a.isHidden {
-		runtime.WindowShow(a.ctx)
-		runtime.WindowSetAlwaysOnTop(a.ctx, true)
-		a.isHidden = false
-	} else {
-		runtime.WindowHide(a.ctx)
-		a.isHidden = true
-	}
+// QuitApp 退出程序
+func (a *App) QuitApp() {
+	runtime.Quit(a.ctx)
 }
 
-// SetExpanded 切换侧边栏宽度 (供前端裁切功能调用)
-// expand: true -> 800px, false -> 350px
+// SetExpanded 切换宽度 (380 <-> 830)
 func (a *App) SetExpanded(expand bool) {
 	a.isExpanded = expand
 	if expand {
-		runtime.WindowSetSize(a.ctx, 800, 768)
+		runtime.WindowSetSize(a.ctx, 830, 720)
 	} else {
-		runtime.WindowSetSize(a.ctx, 350, 768)
+		runtime.WindowSetSize(a.ctx, 380, 720)
 	}
 }
 
-// StartBrowser 启动浏览器
-func (a *App) StartBrowser() string {
-	exePath, _ := os.Executable()
-	userDataDir := filepath.Join(filepath.Dir(exePath), "chrome_data")
-
-	err := a.sniffer.StartBrowser(userDataDir)
+// getURLFileName 解析 URL 获取净化后的文件名
+// 例子: "abc12345.ts?auth=123" -> "abc12345.ts"
+func (a *App) getURLFileName(rawURL string) string {
+	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Sprintf("错误: %v", err)
+		return "video_stream"
 	}
-	return "浏览器启动成功"
+	// path.Base 会处理 /path/to/file.mp4 -> file.mp4
+	// 同时由于 u.Path 已经不包含 ?query，所以净化自动完成
+	name := path.Base(u.Path)
+	if name == "" || name == "." || name == "/" {
+		return "video_stream"
+	}
+	return name
 }
 
-// OpenDownloadFolder 打开下载目录
-func (a *App) OpenDownloadFolder() {
-	exePath, _ := os.Executable()
-	downloadDir := filepath.Join(filepath.Dir(exePath), "Downloads")
-	_ = os.MkdirAll(downloadDir, 0755)
-
-	// 使用 Wails 的 BrowserOpenURL 打开本地路径
-	runtime.BrowserOpenURL(a.ctx, downloadDir)
-}
-
-// ... 之前的 CreateDownloadTask, StartDownload, StopDownload 逻辑保持不变 ...
-// 记得在 CreateDownloadTask 中使用 a.manager.AddTask(task)
-// CreateDownloadTask 创建新下载任务
 func (a *App) CreateDownloadTask(sniffEvent engine.SniffEvent) (*engine.VideoTask, error) {
-	// 1. 预检请求：获取文件大小并检查是否支持 Range
-	size, supportRange := a.preCheckResource(sniffEvent.Url, sniffEvent.Headers)
+	// 1. 净化文件名
+	cleanName := a.getURLFileName(sniffEvent.Url)
 
-	// 2. 准备路径
+	// 如果 URL 没解析出好名字，才考虑用网页 Title
+	finalTitle := cleanName
+	if finalTitle == "video_stream" && sniffEvent.Title != "" {
+		finalTitle = a.sanitizeFilename(sniffEvent.Title)
+	}
+
+	// 2. 预检资源
+	finalSize := sniffEvent.Size
+	finalSupport := sniffEvent.SupportRange
+	if finalSize <= 0 {
+		size, support := a.preCheckResource(sniffEvent.Url, sniffEvent.Headers)
+		finalSize = size
+		if !finalSupport {
+			finalSupport = support
+		}
+	}
+
+	// 3. 准备路径
 	exePath, _ := os.Executable()
 	downloadDir := filepath.Join(filepath.Dir(exePath), "Downloads")
 	_ = os.MkdirAll(downloadDir, 0755)
 
 	taskID := uuid.New().String()
 	tempDir := filepath.Join(downloadDir, ".temp", taskID)
-
-	safeTitle := a.sanitizeFilename(sniffEvent.Title)
-	savePath := filepath.Join(downloadDir, safeTitle+".mp4")
+	savePath := filepath.Join(downloadDir, finalTitle)
+	// 确保有 .mp4 后缀
+	if !strings.HasSuffix(strings.ToLower(savePath), ".mp4") && !strings.HasSuffix(strings.ToLower(savePath), ".ts") {
+		savePath += ".mp4"
+	}
 
 	task := &engine.VideoTask{
 		ID:           taskID,
-		Title:        safeTitle,
+		Title:        finalTitle,
 		Url:          sniffEvent.Url,
 		OriginUrl:    sniffEvent.OriginUrl,
 		TargetID:     sniffEvent.TargetID,
 		Type:         sniffEvent.Type,
 		Status:       "sniffed",
-		Size:         size,
-		SupportRange: supportRange,
+		Size:         finalSize,
+		SupportRange: finalSupport,
 		Headers:      sniffEvent.Headers,
 		SavePath:     savePath,
 		TempDir:      tempDir,
-		Clips:        []engine.TimeRange{},
 	}
 
 	a.manager.AddTask(task)
 	return task, nil
 }
 
-// UpdateTaskUrl 重绑定功能：当链接失效时，更新现有任务的链接
+// --- 其余方法 (StartDownload, StopDownload, DeleteTask, UpdateTaskUrl 等) 保持原样 ---
+
+func (a *App) StartDownload(taskID string) { a.downloader.Start(taskID) }
+func (a *App) StopDownload(taskID string)  { a.downloader.Stop(taskID) }
+
+func (a *App) DeleteTask(taskID string) {
+	a.downloader.Stop(taskID)
+	task := a.manager.GetTaskByID(taskID)
+	if task != nil {
+		_ = os.RemoveAll(task.TempDir)
+		a.manager.RemoveTask(taskID)
+	}
+}
+
 func (a *App) UpdateTaskUrl(taskID string, newUrl string, newHeaders map[string]string) string {
 	task := a.manager.GetTaskByID(taskID)
 	if task == nil {
 		return "任务不存在"
 	}
-
-	// 更新链接和请求头
 	task.Url = newUrl
 	task.Headers = newHeaders
-
-	// 如果是 MP4，重新预检一次（万一 CDN 切换了 Range 支持）
-	if task.Type == "mp4" {
-		size, support := a.preCheckResource(newUrl, newHeaders)
-		task.Size = size
-		task.SupportRange = support
-	}
-
-	a.manager.AddTask(task) // 触发持久化保存
-	return "链接更新成功，可继续下载"
+	a.manager.AddTask(task)
+	return "链接更新成功"
 }
 
-// StartDownload 启动下载
-func (a *App) StartDownload(taskID string) {
-	a.downloader.Start(taskID)
-}
-
-// StopDownload 暂停下载
-func (a *App) StopDownload(taskID string) {
-	a.downloader.Stop(taskID)
-}
-
-// preCheckResource 预检资源信息
-func (a *App) preCheckResource(url string, headers map[string]string) (int64, bool) {
-	client := &http.Client{Timeout: 5 * time.Second}
-	req, err := http.NewRequest("HEAD", url, nil)
-	if err != nil {
-		return 0, false
+func (a *App) UpdateTaskClips(taskID string, clips []engine.TimeRange) {
+	task := a.manager.GetTaskByID(taskID)
+	if task != nil {
+		task.Clips = clips
+		a.manager.AddTask(task)
 	}
-
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, false
-	}
-	defer resp.Body.Close()
-
-	size := resp.ContentLength
-	// 检查服务器是否返回了 Accept-Ranges: bytes
-	supportRange := strings.Contains(resp.Header.Get("Accept-Ranges"), "bytes")
-
-	return size, supportRange
-}
-
-func (a *App) sanitizeFilename(name string) string {
-	badChars := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|"}
-	result := name
-	for _, char := range badChars {
-		result = strings.ReplaceAll(result, char, "_")
-	}
-	return strings.TrimSpace(result)
 }
 
 func (a *App) GetTasks() []*engine.VideoTask {
 	return a.manager.GetAllTasks()
 }
 
-// UpdateTaskClips 更新任务的剪辑区间
-func (a *App) UpdateTaskClips(taskID string, clips []engine.TimeRange) {
-	task := a.manager.GetTaskByID(taskID)
-	if task != nil {
-		task.Clips = clips
-		a.manager.AddTask(task) // 存盘
+func (a *App) StartBrowser() string {
+	if err := a.sniffer.StartBrowser(); err != nil {
+		return err.Error()
 	}
+	return "OK"
 }
 
-// DeleteTask 删除任务
-func (a *App) DeleteTask(taskID string) {
-	// 1. 停止下载
-	a.downloader.Stop(taskID)
+func (a *App) OpenDownloadFolder() {
+	exePath, _ := os.Executable()
+	dir := filepath.Join(filepath.Dir(exePath), "Downloads")
+	_ = os.MkdirAll(dir, 0755)
+	runtime.BrowserOpenURL(a.ctx, dir)
+}
 
-	task := a.manager.GetTaskByID(taskID)
-	if task != nil {
-		// 2. 清理临时目录
-		_ = os.RemoveAll(task.TempDir)
-		// 3. 从管理器移除
-		a.manager.RemoveTask(taskID)
+func (a *App) preCheckResource(url string, headers map[string]string) (int64, bool) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, _ := http.NewRequest("HEAD", url, nil)
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	return resp.ContentLength, strings.Contains(strings.ToLower(resp.Header.Get("Accept-Ranges")), "bytes") || resp.StatusCode == 206
+}
+
+func (a *App) sanitizeFilename(name string) string {
+	r := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
+	return strings.TrimSpace(r.Replace(name))
 }

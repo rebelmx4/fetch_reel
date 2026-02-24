@@ -1,0 +1,36 @@
+(function() {
+    console.log("%c[GO-FIXER] 手动补丁启动中...", "color:white; background:blue; font-size:16px");
+
+    const fixName = (n) => (typeof n === 'string' && n.endsWith('.go')) ? n + '.txt' : n;
+
+    // 劫持 File.prototype.name
+    const orgName = Object.getOwnPropertyDescriptor(File.prototype, 'name').get;
+    Object.defineProperty(File.prototype, 'name', {
+        get: function() { return fixName(orgName.call(this)); },
+        configurable: true
+    });
+
+    // 劫持 Blob.prototype.type
+    const orgType = Object.getOwnPropertyDescriptor(Blob.prototype, 'type').get;
+    Object.defineProperty(Blob.prototype, 'type', {
+        get: function() {
+            const name = orgName.call(this);
+            if (name && name.endsWith('.go')) return 'text/plain';
+            return orgType.call(this);
+        },
+        configurable: true
+    });
+
+    // 劫持 DataTransferItem.prototype.getAsFile
+    const orgGetAsFile = DataTransferItem.prototype.getAsFile;
+    DataTransferItem.prototype.getAsFile = function() {
+        const f = orgGetAsFile.apply(this, arguments);
+        if (f && f.name.endsWith('.go')) {
+            console.log("[命中] 拦截到拖入的文件:", f.name);
+            return new File([f], f.name + ".txt", { type: "text/plain" });
+        }
+        return f;
+    };
+
+    console.log("%c[成功] 补丁已生效！现在可以拖入 Go 文件了。", "color:white; background:green; font-size:16px");
+})();

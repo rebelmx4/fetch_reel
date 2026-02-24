@@ -1,153 +1,115 @@
-import React, { useState, useEffect, useRef } from 'react';
-import {
-    ScrollArea, Card, Text, Group, Badge, ActionIcon,
-    Button, Stack, Collapse, Box, Center, Tooltip // 确保这里有 Collapse 和 Tooltip
-} from '@mantine/core';
-
-import {
-    IconPlayerPlay,
-    IconScissors, // 修正拼写：增加 s
-    IconDownload,
-    IconMovie
-} from '@tabler/icons-react';
-import Hls from 'hls.js';
+import React, { useState } from 'react';
+import { ScrollArea, Text, ActionIcon, Collapse, Box, Badge } from '@mantine/core';
+import { IconMovie, IconPlayerPlay, IconPlayerStop, IconScissors, IconDownload } from '@tabler/icons-react';
 import { useStore } from '../store/useStore';
 import { CreateDownloadTask, StartDownload } from '../../wailsjs/go/main/App';
 
 export default function SniffedList() {
-    const { sniffedMap, activeTargetId, setExpanded, setMarkingTask } = useStore();
-    const [previewIndex, setPreviewIndex] = useState<number | null>(null);
-    const videoRef = useRef<HTMLVideoElement>(null);
+    const { sniffedMap, activeTargetId, setExpanded, setMarkingTask, setTab } = useStore();
+    const [previewIdx, setPreviewIdx] = useState<number | null>(null);
 
-    // 只获取当前活跃标签页的资源
     const items = activeTargetId ? (sniffedMap[activeTargetId] || []) : [];
 
-    // 处理预览播放
-    useEffect(() => {
-        if (previewIndex !== null && videoRef.current) {
-            const item = items[previewIndex];
-            const proxyUrl = `http://127.0.0.1:12345/proxy?url=${encodeURIComponent(item.url)}&referer=${encodeURIComponent(item.originUrl)}`;
-
-            if (item.type === 'hls' && Hls.isSupported()) {
-                const hls = new Hls();
-                hls.loadSource(proxyUrl);
-                hls.attachMedia(videoRef.current);
-            } else {
-                videoRef.current.src = proxyUrl;
-            }
-        }
-    }, [previewIndex, items]);
+    // 文件名处理
+    const getCleanName = (urlStr: string) => {
+        try {
+            const u = new URL(urlStr);
+            const name = u.pathname.split('/').pop();
+            return name && name.trim() !== '' ? name : 'video.mp4';
+        } catch { return 'video_resource'; }
+    };
 
     const handleMark = async (item: any) => {
-        // 1. 调用后端创建任务，获取分配好的 ID 和临时目录
         const task = await CreateDownloadTask(item);
-        // 2. 将任务存入 Store 供 MarkingPage 使用
         setMarkingTask(task);
-        // 3. 扩宽窗口并展示裁切页
         setExpanded(true);
     };
 
-    const handleDownload = async (item: any) => {
+    const handleDL = async (item: any) => {
         const task = await CreateDownloadTask(item);
         await StartDownload(task.id);
-        // 自动切换到“正在下载”标签
-        useStore.getState().setTab('active');
+        setTab('active');
     };
 
-    // 辅助函数：截取 URL 最后一段
-    const getShortUrl = (url: string) => {
-        try {
-            const parts = url.split('/');
-            const last = parts.pop() || parts.pop(); // 处理末尾带斜杠的情况
-            return last?.split('?')[0] || "video_stream";
-        } catch {
-            return "video_stream";
-        }
-    };
-
-    if (!activeTargetId) {
-        return (
-            <Center h="80vh" p="xl">
-                <Text c="dimmed" size="sm" ta="center">请在 Chrome 中选择一个标签页进行嗅探</Text>
-            </Center>
-        );
-    }
+    if (!activeTargetId) return (
+        <div style={{height: '100%', display:'flex', alignItems:'center', justifyContent:'center', color:'#888', fontSize:13}}>
+            <div>请在浏览器中打开包含视频的标签页</div>
+        </div>
+    );
 
     return (
-        <ScrollArea h="calc(100vh - 50px)" p="xs">
-            {items.length === 0 ? (
-                <Center h="50vh">
-                    <Stack align="center" gap="xs">
-                        <IconMovie size={40} color="#373A40" />
-                        <Text c="dimmed" size="xs">当前页面暂无媒体资源</Text>
-                    </Stack>
-                </Center>
-            ) : (
-                <Stack gap="sm">
-                    {items.map((item, index) => (
-                        <Card key={index} withBorder padding="sm" radius="md">
-                            <Stack gap="xs">
-                                {/* 标题与基本信息 */}
-                                <div>
-                                    <Text size="sm" fw={700} truncate title={item.title}>
-                                        {item.title || "未知视频"}
-                                    </Text>
-                                    <Text size="10px" c="dimmed" truncate mt={2}>
-                                        {getShortUrl(item.url)}
-                                    </Text>
+        <ScrollArea h="100%" scrollbars="y">
+            <div style={{ padding: '0' }}>
+                {items.length === 0 && (
+                    <div style={{padding:40, textAlign:'center', color:'#888', fontSize:13}}>
+                        当前页面未检测到视频
+                    </div>
+                )}
+
+                {items.map((item, idx) => {
+                    const displayName = getCleanName(item.url);
+                    const isPreviewing = previewIdx === idx;
+
+                    return (
+                        <div key={idx} style={{
+                            padding: '10px 14px',
+                            borderBottom: '1px solid #f0f0f0', // 浅色分割线
+                            backgroundColor: isPreviewing ? '#f8f9fa' : 'white',
+                            transition: 'background 0.2s'
+                        }}
+                             onMouseEnter={(e)=>{if(!isPreviewing) e.currentTarget.style.background = '#f5f5f5'}}
+                             onMouseLeave={(e)=>{if(!isPreviewing) e.currentTarget.style.background = 'white'}}
+                        >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                {/* 图标背景改为浅灰 */}
+                                <div style={{
+                                    width: 36, height: 36, borderRadius: 6, background: '#f0f0f0',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center'
+                                }}>
+                                    <IconMovie size={20} color="#555" />
                                 </div>
 
-                                <Group justify="space-between">
-                                    <Group gap={5}>
-                                        <Badge size="xs" variant="light" color={item.type === 'hls' ? 'orange' : 'blue'}>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    {/* 标题颜色改为深灰/黑 */}
+                                    <Text size="sm" c="#222" truncate fw={500}>
+                                        {displayName}
+                                    </Text>
+                                    <div style={{display:'flex', alignItems:'center', gap: 8, marginTop:2}}>
+                                        <Badge size="xs" color="gray" radius="sm" variant="light">
                                             {item.type}
                                         </Badge>
-                                        {item.size > 0 && (
-                                            <Badge size="xs" variant="outline">
-                                                {(item.size / 1024 / 1024).toFixed(1)}MB
-                                            </Badge>
-                                        )}
-                                    </Group>
+                                        <Text size="xs" c="dimmed">
+                                            {item.size > 0 ? (item.size/1024/1024).toFixed(1) + ' MB' : '未知大小'}
+                                        </Text>
+                                    </div>
+                                </div>
 
-                                    {/* 操作按钮组 */}
-                                    <Group gap={5}>
-                                        <Tooltip label="预览">
-                                            <ActionIcon
-                                                variant={previewIndex === index ? "filled" : "light"}
-                                                onClick={() => setPreviewIndex(previewIndex === index ? null : index)}
-                                            >
-                                                <IconPlayerPlay size={16} />
-                                            </ActionIcon>
-                                        </Tooltip>
-                                        <Tooltip label="裁切标记">
-                                            <ActionIcon variant="light" color="grape" onClick={() => handleMark(item)}>
-                                                <IconScissors size={16} />
-                                            </ActionIcon>
-                                        </Tooltip>
-                                        <Tooltip label="全量下载">
-                                            <ActionIcon variant="light" color="green" onClick={() => handleDownload(item)}>
-                                                <IconDownload size={16} />
-                                            </ActionIcon>
-                                        </Tooltip>
-                                    </Group>
-                                </Group>
+                                <div style={{ display: 'flex', gap: 4 }}>
+                                    <ActionIcon variant="subtle" color="gray" onClick={()=>setPreviewIdx(isPreviewing?null:idx)}>
+                                        {isPreviewing ? <IconPlayerStop size={18}/> : <IconPlayerPlay size={18}/>}
+                                    </ActionIcon>
+                                    <ActionIcon variant="subtle" color="blue" onClick={()=>handleMark(item)}>
+                                        <IconScissors size={18}/>
+                                    </ActionIcon>
+                                    <ActionIcon variant="subtle" color="teal" onClick={()=>handleDL(item)}>
+                                        <IconDownload size={18}/>
+                                    </ActionIcon>
+                                </div>
+                            </div>
 
-                                {/* 预览折叠区 */}
-                                <Collapse in={previewIndex === index}>
-                                    <Box mt="xs" bg="black" style={{ borderRadius: '4px', overflow: 'hidden' }}>
-                                        <video
-                                            ref={previewIndex === index ? videoRef : null}
-                                            controls
-                                            autoPlay
-                                            style={{ width: '100%', display: 'block' }}
+                            <Collapse in={isPreviewing}>
+                                <Box mt={10} style={{borderRadius: 6, overflow:'hidden', border: '1px solid #eee'}}>
+                                    {isPreviewing && (
+                                        <video controls autoPlay style={{width:'100%', display:'block', maxHeight: 240, background: 'black'}}
+                                               src={`http://127.0.0.1:12345/proxy?url=${encodeURIComponent(item.url)}&referer=${encodeURIComponent(item.originUrl)}`}
                                         />
-                                    </Box>
-                                </Collapse>
-                            </Stack>
-                        </Card>
-                    ))}
-                </Stack>
-            )}
+                                    )}
+                                </Box>
+                            </Collapse>
+                        </div>
+                    );
+                })}
+            </div>
         </ScrollArea>
     );
 }
